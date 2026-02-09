@@ -1,0 +1,214 @@
+blueprint:
+  name: Solar PV Forecast Comparison
+  description: Runs nightly at 23:30 to 1) store the day's solar PV forecast(s)
+    and actual PV generation in a specified CSV file and 2) display the
+    RMSE for each forecast against actual generation. (v14 Feb 2026)
+  domain: automation
+  author: Speak_to_the_Geek (with suggested v14 revisions by Roger Todd, TN USA)
+  source_url: https://github.com/RogerWilsonTodd/HomeAssistant/solar_forecast_comparison.yaml
+  #
+  # Description of Logic Flow
+  #
+  # On first run (temp helper is null),
+  #  1) Initialize temp helper with row number 1,
+  #     each forecast's difference squared sum of 0,
+  #     tomorrow's datestamp, and tomorrow's forecasts.
+  #  2) Set RMSE helper to null.
+  #  3) No action is taken on the CSV file.
+  #
+  #  On subsequent runs (temp helper is not null),
+  #  1) Append temp helper's datestamp and forecasts, along
+  #     with actual PV generation, to the CSV file.
+  #  2) Use actual PV generation to compute updated forecast
+  #     sums of differences squared.
+  #  3) Update the RMSE helper with each forecast's new RMSE.
+  #  4) Update the temp helper with incremented row number,
+  #     the new differences squared sums, tomorrow's datestamp,
+  #     and tomorrow's forecasts.
+  #
+  input:
+    temphlp_input:
+      name: Temporary Text Helper
+      description:
+        Create a helper of type 'text' (input_text) and choose it here.
+        It will be used to store temporary data before writing to the CSV file.
+      selector:
+        entity:
+          domain:
+            - input_text
+          multiple: false
+          reorder: false
+    rmsehlp_input:
+      name: RMSE Text Helper
+      description:
+        Create another helper of type 'text' (input_text) and choose it
+        here. It will be used to store the day's RMSE value for each forecast against
+        actual generation.
+      selector:
+        entity:
+          domain:
+            - input_text
+          multiple: false
+          reorder: false
+    csvfile_input:
+      name: Output CSV File
+      description: Create a File object with CSV extension using the File
+        integration, and select it here as the output file.
+      selector:
+        entity:
+          domain:
+            - notify
+          multiple: false
+          reorder: false
+    pvgensen_input:
+      name: Daily Actual PV Generation (kWh)
+      description: Select an entity reporting daily total PV generation. The
+        value must reset to zero each midnight. If only a cumulative sensor
+        for this data is available, create a Utility Meter helper with daily
+        cycle, and select that Utility Meter helper here.
+      selector:
+        entity:
+          domain:
+            - sensor
+          device_class:
+            - energy
+          multiple: false
+          reorder: false
+    forecasts_input:
+      name: Solar PV Forecasts
+      description: Select tomorrow solar forecast entities to be recorded
+        in the CSV file and reported as RMSE against actual generation.
+        Make note of the order in which named forecasts are chosen.
+      selector:
+        entity:
+          domain:
+            - sensor
+          multiple: true
+          reorder: false
+#
+mode: single
+#
+variables:
+  temphlp: !input temphlp_input
+  rmsehlp: !input rmsehlp_input
+  csvfile: !input csvfile_input
+  pvgensen: !input pvgensen_input
+  forecasts: !input forecasts_input
+  pvgenval: "{{ states(pvgensen) | float(0) | round(1) }}"
+  castcnt: "{{ forecasts | count }}"
+  tempsplit: "{% if states(temphlp) == 'unknown' %} ['']
+    {% else %} {{ states(temphlp).split(',') }} {% endif %}"
+#
+# Run daily at 11:30 pm.
+triggers:
+  - trigger: time
+    at: "23:30:00"
+#
+actions:
+  - choose:
+      #
+      # tempsplit element 0 is null.
+      - conditions:
+          - condition: template
+            value_template: "{{ tempsplit[0] == '' }}"
+        sequence:
+          #
+          # Set temphlp to '1,' (first row number), and, for each
+          # forecast, append '0,' to initialize square diff sums.
+          - action: input_text.set_value
+            metadata: {}
+            data:
+              value: "{{ '1,' + '0,' * castcnt }}"
+            target:
+              entity_id: "{{ temphlp }}"
+          #
+          # Set rmsehlp to ''.
+          - action: input_text.set_value
+            metadata: {}
+            data:
+              value: ""
+            target:
+              entity_id: "{{ rmsehlp }}"
+    #
+    # tempsplit element 0 is not null.
+    default:
+      #
+      # Write datestamp, forecasts, and pvgen to CSV file.
+      # No delay added because there is no anticipated immediate file access.
+      - action: notify.send_message
+        metadata: {}
+        data:
+          message: >-
+            {{ tempsplit[castcnt+1:castcnt*2+2] | join(",") + "," + pvgenval|string }}
+        target:
+          entity_id: "{{ csvfile }}"
+      #
+      # Set temphlp to each forecast's squared(pvgenval-forecast)+previous sum.
+      - repeat:
+          count: "{{ castcnt }}"
+          sequence:
+            - action: input_text.set_value
+              metadata: {}
+              data:
+                value: '{% set castpos = 1 + castcnt + repeat.index %}
+                  {% set diffsq = ((pvgenval - tempsplit[castpos]|float(0))**2)|round(4) %}
+                  {% set newsum = (diffsq + tempsplit[repeat.index]|float(0)) | string + "," %}
+                  {% if repeat.index == 1 %}
+                  {{ newsum }}
+                  {% else %}
+                  {{ states(temphlp) + newsum }}
+                  {% endif %}'
+              target:
+                entity_id: "{{ temphlp }}"
+      #
+      # Update rmsehlp based on local sumsplit variable which has new sums.
+      - repeat:
+          count: "{{ castcnt }}"
+          sequence:
+            - variables:
+                sumsplit: "{{ states(temphlp).split(',') }}"
+            - action: input_text.set_value
+              metadata: {}
+              data:
+                # Feb-2026 [repeat.index-1] works, but [repeat.index0] SHOULD
+                # work and doesn't because it is null. I suspect this
+                # is a Home Assistant bug.
+                value: '{% set newsum = sumsplit[repeat.index-1] | float(0) %}
+                  {% set rownum = tempsplit[0] | int(0) %}
+                  {% set rmse = ((newsum / rownum) ** 0.5) | round(2) | string %}
+                  {% if repeat.index == 1 %}
+                  {{ "RMSE1=" + rmse }}
+                  {% else %}
+                  {{ states(rmsehlp) + "   RMSE" + repeat.index|string + "=" + rmse }}
+                  {% endif %}'
+              target:
+                entity_id: "{{ rmsehlp }}"
+      #
+      # Update temphlp with incremented rownum and updated sums,
+      - action: input_text.set_value
+        metadata: {}
+        data:
+          value: '{{ (tempsplit[0]|int(0) + 1) | string + "," +
+            states(temphlp).split(",")[0:castcnt] | join(",") + "," }}'
+        target:
+          entity_id: "{{ temphlp }}"
+  #
+  # Append to temphlp tomorrow's YYYY-M-D datestamp,
+  - action: input_text.set_value
+    metadata: {}
+    data:
+      value: "{{ states(temphlp) + ((as_timestamp(now())+ (86400)) |
+        timestamp_custom('%Y-%m-%d',true))|string }},"
+    target:
+      entity_id: "{{ temphlp }}"
+  #
+  # Append to temphlp each tomorrow forecast rounded to tenths + ','
+  - repeat:
+      sequence:
+        - action: input_text.set_value
+          metadata: {}
+          data:
+            value: "{{ states(temphlp) + states(repeat.item)|round(1)|string + ',' }}"
+          target:
+            entity_id: "{{ temphlp }}"
+      for_each: "{{ forecasts | list }}"
