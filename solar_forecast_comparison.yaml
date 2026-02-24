@@ -2,14 +2,14 @@ blueprint:
   name: Solar PV Forecast Comparison
   description: Runs nightly at 23:30 to 1) store the day's solar PV forecast(s)
     and actual PV generation in a specified CSV file; 2) display the
-    RMSE for each forecast against actual generation; and 3) Prepare the 
+    RMSE for each forecast against actual generation; and 3) Prepare the
     Temproary Text helper for tomorrow's data. (v14 Feb 2026)
   domain: automation
   author: Speak_to_the_Geek (with suggested revisions by Roger Todd, TN USA)
   source_url: https://github.com/RogerWilsonTodd/HomeAssistant/blob/main/solar_forecast_comparison.yaml
   #
   # Description of Logic Flow
-  #
+  # -------------------------
   # On first run (temp helper is unknown or null),
   #  1) Initialize temp helper with row number 1,
   #     each forecast's difference squared sum of 0,
@@ -26,6 +26,11 @@ blueprint:
   #  4) Update the temp helper with incremented row number,
   #     the new differences squared sums, tomorrow's datestamp,
   #     and tomorrow's forecasts.
+  #
+  # Notes:
+  # 1. 2026-Feb Use of round(#)|string seems to create a string
+  #    with many extra digits. Thus, in the code to follow, rounding
+  #    and string conversion are separate steps.
   #
   input:
     temphlp_input:
@@ -152,12 +157,12 @@ actions:
               metadata: {}
               data:
                 value: '{% set castpos = 1 + castcnt + repeat.index %}
-                  {% set diffsq = ((pvgenval - tempsplit[castpos]|float(0))**2)|round(4) %}
-                  {% set newsum = (diffsq + tempsplit[repeat.index]|float(0)) | string + "," %}
+                  {% set diffsq = ((pvgenval - tempsplit[castpos]|float(0))**2)|round(2) %}
+                  {% set newsum = (diffsq + tempsplit[repeat.index]|float(0)) %}
                   {% if repeat.index == 1 %}
-                  {{ newsum }}
+                  {{ newsum|string + "," }}
                   {% else %}
-                  {{ states(temphlp) + newsum }}
+                  {{ states(temphlp) + newsum|string + "," }}
                   {% endif %}'
               target:
                 entity_id: "{{ temphlp }}"
@@ -172,15 +177,15 @@ actions:
               metadata: {}
               data:
                 # Feb-2026 [repeat.index-1] works, but [repeat.index0] SHOULD
-                # work and doesn't because it is null. I suspect repeat.index0 
+                # work and doesn't because it is null. I suspect repeat.index0
                 # being null is a Home Assistant bug.
                 value: '{% set newsum = sumsplit[repeat.index-1] | float(0) %}
                   {% set rownum = tempsplit[0] | int(0) %}
-                  {% set rmse = ((newsum / rownum) ** 0.5) | round(2) | string %}
+                  {% set rmse = ((newsum / rownum) ** 0.5) | round(2) %}
                   {% if repeat.index == 1 %}
-                  {{ "RMSE1=" + rmse }}
+                  {{ "RMSE1=" + rmse|string }}
                   {% else %}
-                  {{ states(rmsehlp) + "   RMSE" + repeat.index|string + "=" + rmse }}
+                  {{ states(rmsehlp) + "   RMSE" + repeat.index|string + "=" + rmse|string }}
                   {% endif %}'
               target:
                 entity_id: "{{ rmsehlp }}"
@@ -213,3 +218,4 @@ actions:
           target:
             entity_id: "{{ temphlp }}"
       for_each: "{{ forecasts | list }}"
+
